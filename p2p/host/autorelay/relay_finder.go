@@ -191,13 +191,27 @@ func (rf *relayFinder) background(ctx context.Context) {
 				rf.notifyMaybeNeedNewCandidates()
 			}
 		case <-staticRelaysTicker.C:
+			var checkStaticRelays = false
 			if rf.usesStaticRelay() {
+				rf.relayMx.Lock()
+
+				for _, ai := range rf.conf.staticRelays {
+					if _, found := rf.relays[ai.ID]; !found {
+						checkStaticRelays = true
+						break
+					}
+				}
+				rf.relayMx.Unlock()
+			}
+
+			if checkStaticRelays {
 				rf.refCount.Add(1)
 				go func() {
 					defer rf.refCount.Done()
 					rf.handleStaticRelays(ctx)
 				}()
 			}
+
 		case <-ctx.Done():
 			return
 		}
