@@ -135,7 +135,8 @@ func (rf *relayFinder) background(ctx context.Context) {
 	defer backoffTicker.Stop()
 	oldCandidateTicker := rf.conf.clock.Ticker(rf.conf.maxCandidateAge / 5)
 	defer oldCandidateTicker.Stop()
-
+	staticRelaysTicker := rf.conf.clock.Ticker(rf.conf.backoff / 10)
+	defer staticRelaysTicker.Stop()
 	for {
 		// when true, we need to identify push
 		var push bool
@@ -188,6 +189,14 @@ func (rf *relayFinder) background(ctx context.Context) {
 			rf.candidateMx.Unlock()
 			if deleted {
 				rf.notifyMaybeNeedNewCandidates()
+			}
+		case <-staticRelaysTicker.C:
+			if rf.usesStaticRelay() {
+				rf.refCount.Add(1)
+				go func() {
+					defer rf.refCount.Done()
+					rf.handleStaticRelays(ctx)
+				}()
 			}
 		case <-ctx.Done():
 			return
