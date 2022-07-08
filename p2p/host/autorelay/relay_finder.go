@@ -194,9 +194,8 @@ func (rf *relayFinder) background(ctx context.Context) {
 			var checkStaticRelays = false
 			if rf.usesStaticRelay() {
 				rf.relayMx.Lock()
-
 				for _, ai := range rf.conf.staticRelays {
-					if _, found := rf.relays[ai.ID]; !found {
+					if !rf.usingRelay(ai.ID) {
 						checkStaticRelays = true
 						break
 					}
