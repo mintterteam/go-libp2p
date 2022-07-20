@@ -72,7 +72,7 @@ type relayFinder struct {
 	// * the disconnection of a relay
 	// * the failed attempt to obtain a reservation with a current candidate
 	// * a candidate is deleted due to its age
-	maybeRequestNewCandidates chan struct{} // cap: 1.
+	maybeRequestNewCandidates chan peer.AddrInfo // cap: 1.
 
 	relayUpdated chan struct{}
 
@@ -93,7 +93,7 @@ func newRelayFinder(host *basic.BasicHost, peerSource func(int) <-chan peer.Addr
 		backoff:                    make(map[peer.ID]time.Time),
 		candidateFound:             make(chan struct{}, 1),
 		maybeConnectToRelayTrigger: make(chan struct{}, 1),
-		maybeRequestNewCandidates:  make(chan struct{}, 1),
+		maybeRequestNewCandidates:  make(chan peer.AddrInfo, 1),
 		relays:                     make(map[peer.ID]*circuitv2.Reservation),
 		relayUpdated:               make(chan struct{}, 1),
 	}
@@ -147,15 +147,34 @@ func (rf *relayFinder) background(ctx context.Context) {
 				return
 			}
 			evt := ev.(event.EvtPeerConnectednessChanged)
-			if evt.Connectedness != network.NotConnected {
+			var isStaticRelay bool = false
+			for _, pi := range rf.conf.staticRelays {
+				if evt.Peer == pi.ID {
+					isStaticRelay = true
+					break
+				}
+			}
+			if !isStaticRelay && evt.Connectedness != network.NotConnected {
 				continue
 			}
+			if isStaticRelay {
+				log.Debugw("Connectedness change detected", "new status", evt.Connectedness.String(), "static Relay ID", evt.Peer.String())
+			}
+
 			rf.relayMx.Lock()
 			if rf.usingRelay(evt.Peer) { // we were disconnected from a relay
 				log.Debugw("disconnected from relay", "id", evt.Peer)
+				deletedRelay, ok := rf.relays[evt.Peer]
+				if !ok {
+					log.Debugw("can't find relay", "id", evt.Peer)
+					return
+				}
 				delete(rf.relays, evt.Peer)
 				rf.notifyMaybeConnectToRelay()
-				rf.notifyMaybeNeedNewCandidates()
+				rf.notifyMaybeNeedNewCandidates(peer.AddrInfo{
+					ID:    evt.Peer,
+					Addrs: deletedRelay.Addrs,
+				})
 				push = true
 			}
 			rf.relayMx.Unlock()
@@ -177,18 +196,19 @@ func (rf *relayFinder) background(ctx context.Context) {
 			}
 			rf.candidateMx.Unlock()
 		case now := <-oldCandidateTicker.C:
-			var deleted bool
+			var deletedCand *candidate
+
 			rf.candidateMx.Lock()
 			for id, cand := range rf.candidates {
 				if !cand.added.Add(rf.conf.maxCandidateAge).After(now) {
-					deleted = true
+					deletedCand = cand
 					log.Debugw("deleting candidate due to age", "id", id)
 					delete(rf.candidates, id)
 				}
 			}
 			rf.candidateMx.Unlock()
-			if deleted {
-				rf.notifyMaybeNeedNewCandidates()
+			if deletedCand != nil {
+				rf.notifyMaybeNeedNewCandidates(deletedCand.ai)
 			}
 		case <-staticRelaysTicker.C:
 			var checkStaticRelays = false
@@ -249,8 +269,27 @@ func (rf *relayFinder) findNodes(ctx context.Context) {
 		}
 
 		select {
-		case <-rf.maybeRequestNewCandidates:
-			continue
+		case pi := <-rf.maybeRequestNewCandidates:
+			log.Debugw("request new candidate", "id", pi.ID)
+			rf.candidateMx.Lock()
+			numCandidates := len(rf.candidates)
+			backoffStart, isOnBackoff := rf.backoff[pi.ID]
+			rf.candidateMx.Unlock()
+			if isOnBackoff {
+				log.Debugw("skipping node that we recently failed to obtain a reservation with", "id", pi.ID, "last attempt", rf.conf.clock.Since(backoffStart))
+				continue
+			}
+			if numCandidates >= rf.conf.maxCandidates {
+				log.Debugw("skipping node. Already have enough candidates", "id", pi.ID, "num", numCandidates, "max", rf.conf.maxCandidates)
+				continue
+			}
+			rf.refCount.Add(1)
+			wg.Add(1)
+			go func() {
+				defer rf.refCount.Done()
+				defer wg.Done()
+				rf.handleNewNode(ctx, pi)
+			}()
 		case now := <-timer.Chan():
 			if peerChan != nil {
 				// We're still reading peers from the peerChan. No need to query for more peers now.
@@ -314,9 +353,9 @@ func (rf *relayFinder) notifyMaybeConnectToRelay() {
 	}
 }
 
-func (rf *relayFinder) notifyMaybeNeedNewCandidates() {
+func (rf *relayFinder) notifyMaybeNeedNewCandidates(ai peer.AddrInfo) {
 	select {
-	case rf.maybeRequestNewCandidates <- struct{}{}:
+	case rf.maybeRequestNewCandidates <- ai:
 	default:
 	}
 }
@@ -495,13 +534,13 @@ func (rf *relayFinder) maybeConnectToRelay(ctx context.Context) {
 			rf.candidateMx.Lock()
 			delete(rf.candidates, id)
 			rf.candidateMx.Unlock()
-			rf.notifyMaybeNeedNewCandidates()
+			rf.notifyMaybeNeedNewCandidates(cand.ai)
 			continue
 		}
 		rsvp, err := rf.connectToRelay(ctx, cand)
 		if err != nil {
 			log.Debugw("failed to connect to relay", "peer", id, "error", err)
-			rf.notifyMaybeNeedNewCandidates()
+			rf.notifyMaybeNeedNewCandidates(cand.ai)
 			continue
 		}
 		log.Debugw("adding new relay", "id", id)
@@ -509,7 +548,7 @@ func (rf *relayFinder) maybeConnectToRelay(ctx context.Context) {
 		rf.relays[id] = rsvp
 		numRelays := len(rf.relays)
 		rf.relayMx.Unlock()
-		rf.notifyMaybeNeedNewCandidates()
+		rf.notifyMaybeNeedNewCandidates(cand.ai)
 
 		rf.host.ConnManager().Protect(id, autorelayTag) // protect the connection
 
