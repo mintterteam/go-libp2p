@@ -28,7 +28,10 @@ type config struct {
 	// Number of relays we strive to obtain a reservation with.
 	desiredRelays int
 	// see WithMaxCandidateAge
-	maxCandidateAge  time.Duration
+	maxCandidateAge time.Duration
+	// staticRescan is the time we try to reconect to static relays (if disconnected).
+	staticRescan time.Duration
+
 	setMinCandidates bool
 	enableCircuitV1  bool
 }
@@ -41,6 +44,7 @@ var defaultConfig = config{
 	backoff:         time.Hour,
 	desiredRelays:   2,
 	maxCandidateAge: 30 * time.Minute,
+	staticRescan:    time.Hour,
 }
 
 var (
@@ -164,6 +168,14 @@ func WithBootDelay(d time.Duration) Option {
 func WithBackoff(d time.Duration) Option {
 	return func(c *config) error {
 		c.backoff = d
+		return nil
+	}
+}
+
+// WithStaticRescan sets the time we try to reconect to static relays (if disconnected).
+func WithStaticRescan(d time.Duration) Option {
+	return func(c *config) error {
+		c.staticRescan = d
 		return nil
 	}
 }

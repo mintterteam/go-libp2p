@@ -135,7 +135,7 @@ func (rf *relayFinder) background(ctx context.Context) {
 	defer backoffTicker.Stop()
 	oldCandidateTicker := rf.conf.clock.Ticker(rf.conf.maxCandidateAge / 5)
 	defer oldCandidateTicker.Stop()
-	staticRelaysTicker := rf.conf.clock.Ticker(rf.conf.backoff / 10)
+	staticRelaysTicker := rf.conf.clock.Ticker(rf.conf.staticRescan)
 	defer staticRelaysTicker.Stop()
 	for {
 		// when true, we need to identify push
