@@ -287,6 +287,37 @@ func TestStaticRelays(t *testing.T) {
 	require.Eventually(t, func() bool { return numRelays(h) > 0 }, 2*time.Second, 50*time.Millisecond)
 }
 
+func TestReconnectToStaticRelays(t *testing.T) {
+	var staticRelays []peer.AddrInfo
+	const numStaticRelays = 1 //Since candidate selection is random, more than 1 we are not sure which one selects
+	relays := make([]host.Host, 0, numStaticRelays)
+	for i := 0; i < numStaticRelays; i++ {
+		r := newRelay(t)
+		t.Cleanup(func() { r.Close() })
+		relays = append(relays, r)
+		staticRelays = append(staticRelays, peer.AddrInfo{ID: r.ID(), Addrs: r.Addrs()})
+	}
+
+	h := newPrivateNode(t,
+		autorelay.WithStaticRelays(staticRelays),
+		autorelay.WithNumRelays(1),
+	)
+
+	defer h.Close()
+
+	require.Eventually(t, func() bool { return numRelays(h) == 1 }, 3*time.Second, 50*time.Millisecond)
+
+	relaysInUse := usedRelays(h)
+	oldRelay := relaysInUse[0]
+	for _, r := range relays {
+		if r.ID() == oldRelay {
+			r.Network().ClosePeer(h.ID())
+		}
+	}
+
+	require.Eventually(t, func() bool { return numRelays(h) == 1 }, 3*time.Second, 100*time.Millisecond)
+}
+
 func TestRelayV1(t *testing.T) {
 	t.Run("relay v1 support disabled", func(t *testing.T) {
 		peerChan := make(chan peer.AddrInfo, 1)

@@ -177,8 +177,14 @@ func (rf *relayFinder) background(ctx context.Context) {
 		case now := <-oldCandidateTicker.C:
 			var deleted bool
 			rf.candidateMx.Lock()
+		CANDIDATES_LOOP:
 			for id, cand := range rf.candidates {
 				if !cand.added.Add(rf.conf.maxCandidateAge).After(now) {
+					for _, r := range rf.conf.staticRelays {
+						if r.ID == cand.ai.ID {
+							continue CANDIDATES_LOOP
+						}
+					}
 					deleted = true
 					log.Debugw("deleting candidate due to age", "id", id)
 					delete(rf.candidates, id)
@@ -322,10 +328,19 @@ func (rf *relayFinder) handleNewNode(ctx context.Context, pi peer.AddrInfo) (add
 
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
+	var keepCandidate bool
 	supportsV2, err := rf.tryNode(ctx, pi)
 	if err != nil {
-		log.Debugf("node %s not accepted as a candidate: %s", pi.ID, err)
-		return false
+		for _, r := range rf.conf.staticRelays {
+			if r.ID == pi.ID {
+				supportsV2 = true // The default
+				keepCandidate = true
+			}
+		}
+		if !keepCandidate {
+			log.Debugf("node %s not accepted as a candidate: %s", pi.ID, err)
+			return false
+		}
 	}
 	rf.candidateMx.Lock()
 	if len(rf.candidates) > rf.conf.maxCandidates {
@@ -468,10 +483,20 @@ func (rf *relayFinder) maybeConnectToRelay(ctx context.Context) {
 		usingRelay := rf.usingRelay(id)
 		rf.relayMx.Unlock()
 		if usingRelay {
-			rf.candidateMx.Lock()
-			delete(rf.candidates, id)
-			rf.candidateMx.Unlock()
-			rf.notifyMaybeNeedNewCandidates()
+			var deleteCandidate bool = true
+			for _, r := range rf.conf.staticRelays {
+				if r.ID == cand.ai.ID {
+					deleteCandidate = false
+					break
+				}
+			}
+			if deleteCandidate {
+				rf.candidateMx.Lock()
+				delete(rf.candidates, id)
+				rf.candidateMx.Unlock()
+				rf.notifyMaybeNeedNewCandidates()
+			}
+
 			continue
 		}
 		rsvp, err := rf.connectToRelay(ctx, cand)
@@ -505,15 +530,26 @@ func (rf *relayFinder) connectToRelay(ctx context.Context, cand *candidate) (*ci
 
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-
+	var deleteCandidate bool = true
 	var rsvp *circuitv2.Reservation
+
+	// make sure we stick with static relays
+	for _, r := range rf.conf.staticRelays {
+		if r.ID == cand.ai.ID {
+			deleteCandidate = false
+			break
+		}
+	}
 
 	// make sure we're still connected.
 	if rf.host.Network().Connectedness(id) != network.Connected {
 		if err := rf.host.Connect(ctx, cand.ai); err != nil {
-			rf.candidateMx.Lock()
-			delete(rf.candidates, cand.ai.ID)
-			rf.candidateMx.Unlock()
+			if deleteCandidate {
+				rf.candidateMx.Lock()
+				delete(rf.candidates, cand.ai.ID)
+				rf.candidateMx.Unlock()
+			}
+
 			return nil, fmt.Errorf("failed to connect: %w", err)
 		}
 	}
@@ -528,9 +564,13 @@ func (rf *relayFinder) connectToRelay(ctx context.Context, cand *candidate) (*ci
 			err = fmt.Errorf("failed to reserve slot: %w", err)
 		}
 	}
-	rf.candidateMx.Lock()
-	delete(rf.candidates, id)
-	rf.candidateMx.Unlock()
+
+	if deleteCandidate {
+		rf.candidateMx.Lock()
+		delete(rf.candidates, id)
+		rf.candidateMx.Unlock()
+	}
+
 	return rsvp, err
 }
 
