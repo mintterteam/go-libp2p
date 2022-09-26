@@ -118,7 +118,6 @@ func (rf *relayFinder) background(ctx context.Context) {
 		defer rf.refCount.Done()
 		rf.handleNewCandidates(ctx)
 	}()
-
 	subConnectedness, err := rf.host.EventBus().Subscribe(new(event.EvtPeerConnectednessChanged))
 	if err != nil {
 		log.Error("failed to subscribe to the EvtPeerConnectednessChanged")
@@ -145,18 +144,29 @@ func (rf *relayFinder) background(ctx context.Context) {
 				return
 			}
 			evt := ev.(event.EvtPeerConnectednessChanged)
-			if evt.Connectedness != network.NotConnected {
+
+			if evt.Connectedness == network.NotConnected {
+				rf.relayMx.Lock()
+				if rf.usingRelay(evt.Peer) { // we were disconnected from a relay
+					log.Debugw("disconnected from relay", "id", evt.Peer)
+					delete(rf.relays, evt.Peer)
+					rf.notifyMaybeConnectToRelay()
+					rf.notifyMaybeNeedNewCandidates()
+					push = true
+				}
+				rf.relayMx.Unlock()
+			} else if evt.Connectedness == network.Connected {
+				for _, r := range rf.conf.staticRelays {
+					if r.ID == evt.Peer {
+						rf.notifyMaybeConnectToRelay()
+						rf.notifyMaybeNeedNewCandidates()
+						push = true
+						break
+					}
+				}
+			} else {
 				continue
 			}
-			rf.relayMx.Lock()
-			if rf.usingRelay(evt.Peer) { // we were disconnected from a relay
-				log.Debugw("disconnected from relay", "id", evt.Peer)
-				delete(rf.relays, evt.Peer)
-				rf.notifyMaybeConnectToRelay()
-				rf.notifyMaybeNeedNewCandidates()
-				push = true
-			}
-			rf.relayMx.Unlock()
 		case <-rf.candidateFound:
 			rf.notifyMaybeConnectToRelay()
 		case <-bootDelayTimer.C:
