@@ -689,7 +689,7 @@ func (rf *relayFinder) Start() error {
 	if rf.ctxCancel != nil {
 		return errors.New("relayFinder already running")
 	}
-	log.Debug("starting relay finder")
+	log.Debug("starting mtt relay finder")
 	ctx, cancel := context.WithCancel(context.Background())
 	rf.ctxCancel = cancel
 	rf.refCount.Add(1)
