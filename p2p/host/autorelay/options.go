@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -15,8 +16,10 @@ type config struct {
 	clock      clock.Clock
 	peerSource func(ctx context.Context, num int) <-chan peer.AddrInfo
 	// minimum interval used to call the peerSource callback
-	minInterval  time.Duration
-	staticRelays []peer.AddrInfo
+	peerMinInterval   time.Duration
+	staticRelaySource func(ctx context.Context, num int) <-chan peer.AddrInfo
+	// minimum interval used to call the staticRelaySource callback
+	staticRelayMinInterval time.Duration
 	// see WithMinCandidates
 	minCandidates int
 	// see WithMaxCandidates
@@ -44,11 +47,6 @@ var defaultConfig = config{
 	maxCandidateAge: 30 * time.Minute,
 }
 
-var (
-	errStaticRelaysMinCandidates = errors.New("cannot use WithMinCandidates and WithStaticRelays")
-	errStaticRelaysPeerSource    = errors.New("cannot use WithPeerSource and WithStaticRelays")
-)
-
 // DefaultRelays are the known PL-operated v1 relays; will be decommissioned in 2022.
 var DefaultRelays = []string{
 	"/ip4/147.75.80.110/tcp/4001/p2p/QmbFgm5zan8P6eWWmeyfncR5feYEMPbht5b1FW1C37aQ7y",
@@ -74,18 +72,27 @@ func init() {
 type Option func(*config) error
 
 func WithStaticRelays(static []peer.AddrInfo) Option {
+
+	staticRelayChan := make(chan peer.AddrInfo, len(static))
+
 	return func(c *config) error {
-		if c.setMinCandidates {
-			return errStaticRelaysMinCandidates
-		}
-		if c.peerSource != nil {
-			return errStaticRelaysPeerSource
-		}
-		if len(c.staticRelays) > 0 {
+		if c.staticRelaySource != nil {
 			return errors.New("can't set static relays, static relays already configured")
 		}
 		c.minCandidates = len(static)
-		c.staticRelays = static
+		c.staticRelaySource = func(ctx context.Context, num int) <-chan peer.AddrInfo {
+			c.staticRelayMinInterval = time.Hour
+			rand.Seed(time.Now().UnixNano())
+			var static_candidates = static
+			rand.Shuffle(len(static_candidates), func(i, j int) {
+				static_candidates[i], static_candidates[j] = static_candidates[j], static_candidates[i]
+			})
+			for i := 0; i < num%c.minCandidates; i++ {
+				staticRelayChan <- static_candidates[i]
+			}
+			return staticRelayChan
+		}
+
 		return nil
 	}
 }
@@ -107,11 +114,8 @@ func WithDefaultStaticRelays() Option {
 // If the channel is canceled you MUST close the output channel at some point.
 func WithPeerSource(f func(ctx context.Context, numPeers int) <-chan peer.AddrInfo, minInterval time.Duration) Option {
 	return func(c *config) error {
-		if len(c.staticRelays) > 0 {
-			return errStaticRelaysPeerSource
-		}
 		c.peerSource = f
-		c.minInterval = minInterval
+		c.peerMinInterval = minInterval
 		return nil
 	}
 }
@@ -140,9 +144,6 @@ func WithMaxCandidates(n int) Option {
 // This is to make sure that we don't just randomly connect to the first candidate that we discover.
 func WithMinCandidates(n int) Option {
 	return func(c *config) error {
-		if len(c.staticRelays) > 0 {
-			return errStaticRelaysMinCandidates
-		}
 		if n > c.maxCandidates {
 			n = c.maxCandidates
 		}
