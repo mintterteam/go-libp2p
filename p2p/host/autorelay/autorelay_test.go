@@ -270,9 +270,10 @@ func TestBackoff(t *testing.T) {
 }
 
 func TestStaticRelays(t *testing.T) {
-	const numStaticRelays = 3
+	const totalRelays = 3
+	const numStaticRelays = 2 // Must be <= totalRelays
 	var staticRelays []peer.AddrInfo
-	for i := 0; i < numStaticRelays; i++ {
+	for i := 0; i < totalRelays; i++ {
 		r := newRelay(t)
 		t.Cleanup(func() { r.Close() })
 		staticRelays = append(staticRelays, peer.AddrInfo{ID: r.ID(), Addrs: r.Addrs()})
@@ -280,18 +281,19 @@ func TestStaticRelays(t *testing.T) {
 
 	h := newPrivateNode(t,
 		autorelay.WithStaticRelays(staticRelays),
-		autorelay.WithNumRelays(1),
+		autorelay.WithNumRelays(numStaticRelays),
 	)
 	defer h.Close()
 
-	require.Eventually(t, func() bool { return numRelays(h) > 0 }, 2*time.Second, 50*time.Millisecond)
+	require.Eventually(t, func() bool { return numRelays(h) == numStaticRelays }, 2*time.Second, 50*time.Millisecond)
 }
 
 func TestReconnectToStaticRelays(t *testing.T) {
 	var staticRelays []peer.AddrInfo
-	const numStaticRelays = 1 //Since candidate selection is random, more than 1 we are not sure which one selects
-	relays := make([]host.Host, 0, numStaticRelays)
-	for i := 0; i < numStaticRelays; i++ {
+	const totalRelays = 3
+	const numStaticRelays = 2 // Must be <= totalRelays
+	relays := make([]host.Host, 0, totalRelays)
+	for i := 0; i < totalRelays; i++ {
 		r := newRelay(t)
 		t.Cleanup(func() { r.Close() })
 		relays = append(relays, r)
@@ -300,12 +302,13 @@ func TestReconnectToStaticRelays(t *testing.T) {
 
 	h := newPrivateNode(t,
 		autorelay.WithStaticRelays(staticRelays),
-		autorelay.WithNumRelays(1),
+		autorelay.WithNumRelays(numStaticRelays),
+		autorelay.WithBootDelay(time.Second),
 	)
 
 	defer h.Close()
 
-	require.Eventually(t, func() bool { return numRelays(h) == 1 }, 3*time.Second, 50*time.Millisecond)
+	require.Eventually(t, func() bool { return numRelays(h) == numStaticRelays }, 3*time.Second, 50*time.Millisecond)
 
 	relaysInUse := usedRelays(h)
 	oldRelay := relaysInUse[0]
@@ -315,7 +318,7 @@ func TestReconnectToStaticRelays(t *testing.T) {
 		}
 	}
 
-	require.Eventually(t, func() bool { return numRelays(h) == 1 }, 3*time.Second, 100*time.Millisecond)
+	require.Eventually(t, func() bool { return numRelays(h) == numStaticRelays }, 3*time.Second, 100*time.Millisecond)
 }
 
 func TestRelayV1(t *testing.T) {

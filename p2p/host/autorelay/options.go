@@ -86,6 +86,15 @@ func WithStaticRelays(static []peer.AddrInfo) Option {
 		}
 		c.minCandidates = len(static)
 		c.staticRelays = static
+
+		c.peerSource = func(_ context.Context, num int) <-chan peer.AddrInfo {
+			peerChan := make(chan peer.AddrInfo, c.minCandidates)
+			for _, r := range c.staticRelays {
+				peerChan <- peer.AddrInfo{ID: r.ID, Addrs: r.Addrs}
+			}
+			close(peerChan)
+			return peerChan
+		}
 		return nil
 	}
 }
