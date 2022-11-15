@@ -59,8 +59,7 @@ type relayFinder struct {
 	ctxCancel   context.CancelFunc
 	ctxCancelMx sync.Mutex
 
-	peerSource        func(context.Context, int) <-chan peer.AddrInfo
-	staticRelaySource func(context.Context, int) <-chan peer.AddrInfo
+	peerSource func(context.Context, int) <-chan peer.AddrInfo
 
 	candidateFound             chan struct{} // receives every time we find a new relay candidate
 	candidateMx                sync.Mutex
@@ -83,14 +82,12 @@ type relayFinder struct {
 	cachedAddrsExpiry time.Time
 }
 
-func newRelayFinder(host *basic.BasicHost, peerSource, staticRelaySource func(context.Context, int) <-chan peer.AddrInfo,
-	conf *config) *relayFinder {
+func newRelayFinder(host *basic.BasicHost, peerSource func(context.Context, int) <-chan peer.AddrInfo, conf *config) *relayFinder {
 	return &relayFinder{
 		bootTime:                   conf.clock.Now(),
 		host:                       host,
 		conf:                       conf,
 		peerSource:                 peerSource,
-		staticRelaySource:          staticRelaySource,
 		candidates:                 make(map[peer.ID]*candidate),
 		backoff:                    make(map[peer.ID]time.Time),
 		candidateFound:             make(chan struct{}, 1),
@@ -102,11 +99,19 @@ func newRelayFinder(host *basic.BasicHost, peerSource, staticRelaySource func(co
 }
 
 func (rf *relayFinder) background(ctx context.Context) {
-	rf.refCount.Add(1)
-	go func() {
-		defer rf.refCount.Done()
-		rf.findNodes(ctx)
-	}()
+	if rf.usesStaticRelay() {
+		rf.refCount.Add(1)
+		go func() {
+			defer rf.refCount.Done()
+			rf.handleStaticRelays(ctx)
+		}()
+	} else {
+		rf.refCount.Add(1)
+		go func() {
+			defer rf.refCount.Done()
+			rf.findNodes(ctx)
+		}()
+	}
 
 	rf.refCount.Add(1)
 	go func() {
@@ -201,18 +206,10 @@ func (rf *relayFinder) background(ctx context.Context) {
 // It garbage collects old entries, so that nodes doesn't overflow.
 // This makes sure that as soon as we need to find relay candidates, we have them available.
 func (rf *relayFinder) findNodes(ctx context.Context) {
-	var peerChan <-chan peer.AddrInfo = nil
-	//var staticRelayChan <-chan peer.AddrInfo = nil
-	if rf.peerSource != nil {
-		peerChan = rf.peerSource(ctx, rf.conf.maxCandidates)
-	}
-	//if rf.staticRelaySource != nil {
-	//	staticRelayChan = rf.staticRelaySource(ctx, rf.conf.maxCandidates)
-	//}
-
+	peerChan := rf.peerSource(ctx, rf.conf.maxCandidates)
 	var wg sync.WaitGroup
 	lastCallToPeerSource := rf.conf.clock.Now()
-	//lastCallToStaticRelaySource := rf.conf.clock.Now()
+
 	timer := newTimer(rf.conf.clock)
 	for {
 		rf.candidateMx.Lock()
@@ -221,7 +218,7 @@ func (rf *relayFinder) findNodes(ctx context.Context) {
 
 		if peerChan == nil {
 			now := rf.conf.clock.Now()
-			nextAllowedCallToPeerSource := lastCallToPeerSource.Add(rf.conf.peerMinInterval).Sub(now)
+			nextAllowedCallToPeerSource := lastCallToPeerSource.Add(rf.conf.minInterval).Sub(now)
 			if numCandidates < rf.conf.minCandidates {
 				log.Debugw("not enough candidates. Resetting timer", "num", numCandidates, "desired", rf.conf.minCandidates)
 				timer.Reset(nextAllowedCallToPeerSource)
@@ -271,6 +268,23 @@ func (rf *relayFinder) findNodes(ctx context.Context) {
 			return
 		}
 	}
+}
+
+func (rf *relayFinder) handleStaticRelays(ctx context.Context) {
+	sem := make(chan struct{}, 4)
+	var wg sync.WaitGroup
+	wg.Add(len(rf.conf.staticRelays))
+	for _, pi := range rf.conf.staticRelays {
+		sem <- struct{}{}
+		go func(pi peer.AddrInfo) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			rf.handleNewNode(ctx, pi)
+		}(pi)
+	}
+	wg.Wait()
+	log.Debug("processed all static relays")
+	rf.notifyNewCandidate()
 }
 
 func (rf *relayFinder) notifyMaybeConnectToRelay() {
@@ -626,7 +640,7 @@ func (rf *relayFinder) relayAddrs(addrs []ma.Multiaddr) []ma.Multiaddr {
 }
 
 func (rf *relayFinder) usesStaticRelay() bool {
-	return rf.conf.staticRelaySource != nil
+	return len(rf.conf.staticRelays) > 0
 }
 
 func (rf *relayFinder) Start() error {

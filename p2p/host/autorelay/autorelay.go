@@ -45,7 +45,7 @@ func NewAutoRelay(bhost *basic.BasicHost, opts ...Option) (*AutoRelay, error) {
 	}
 	r.ctx, r.ctxCancel = context.WithCancel(context.Background())
 	r.conf = &conf
-	r.relayFinder = newRelayFinder(bhost, conf.peerSource, conf.staticRelaySource, &conf)
+	r.relayFinder = newRelayFinder(bhost, conf.peerSource, &conf)
 	bhost.AddrsFactory = r.hostAddrs
 
 	r.refCount.Add(1)
